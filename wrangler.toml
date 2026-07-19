@@ -1,0 +1,9 @@
+name = "brennan"
+main = "brennan_worker.js"
+compatibility_date = "2025-01-01"
+
+# Product photos and other static files, served by Cloudflare before the
+# Worker runs. Anything in ./public is available at its path, e.g.
+# public/images/white-sourdough.webp  ->  https://brennanbakehouse.uk/images/white-sourdough.webp
+[assets]
+directory = "./public"
