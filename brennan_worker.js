@@ -1227,10 +1227,38 @@ export default {
         if (name) {
           const productId = (form.get("product_id") || "").toString().trim() || null;
           const batch = Math.max(1, parseInt(form.get("batch_size"), 10) || 1);
+          const pounds = v => Math.max(0, Math.round(parseFloat((v || "0").toString().replace(/^£/, "")) * 100) || 0);
           await fetch(`${SUPABASE_URL}/rest/v1/shop_recipes`, {
             method: "POST",
             headers: { ...sb(env), "Content-Type": "application/json" },
-            body: JSON.stringify({ name, product_id: productId, batch_size: batch }),
+            body: JSON.stringify({
+              name, product_id: productId, batch_size: batch,
+              labour_minutes: Math.max(0, parseInt(form.get("labour_minutes"), 10) || 0),
+              labour_rate_pence_per_hour: pounds(form.get("labour_rate")),
+              overhead_pence: pounds(form.get("overhead")),
+              packaging_pence_per_item: pounds(form.get("packaging")),
+            }),
+          });
+        }
+        return Response.redirect(`${SITE_BASE}/admin#costing`, 303);
+      }
+      if (url.pathname === "/admin/recipe-update" && request.method === "POST") {
+        if (!adminAuthed(request, env)) return adminChallenge();
+        const form = await request.formData();
+        const id = (form.get("id") || "").toString();
+        if (id) {
+          const pounds = v => Math.max(0, Math.round(parseFloat((v || "0").toString().replace(/^£/, "")) * 100) || 0);
+          await fetch(`${SUPABASE_URL}/rest/v1/shop_recipes?id=eq.${encodeURIComponent(id)}`, {
+            method: "PATCH",
+            headers: { ...sb(env), "Content-Type": "application/json" },
+            body: JSON.stringify({
+              batch_size: Math.max(1, parseInt(form.get("batch_size"), 10) || 1),
+              labour_minutes: Math.max(0, parseInt(form.get("labour_minutes"), 10) || 0),
+              labour_rate_pence_per_hour: pounds(form.get("labour_rate")),
+              overhead_pence: pounds(form.get("overhead")),
+              packaging_pence_per_item: pounds(form.get("packaging")),
+              updated_at: new Date().toISOString(),
+            }),
           });
         }
         return Response.redirect(`${SITE_BASE}/admin#costing`, 303);
@@ -1280,8 +1308,10 @@ export default {
           const rec = Array.isArray(recs) && recs[0];
           if (rec && rec.product_id) {
             const ings = await fetch(`${SUPABASE_URL}/rest/v1/shop_recipe_ingredients?recipe_id=eq.${encodeURIComponent(id)}`, { headers: sb(env) }).then(r => r.json()).catch(() => []);
-            const total = (Array.isArray(ings) ? ings : []).reduce((n, i) => n + (i.pack_qty > 0 ? Math.round(i.pack_cost_pence * i.used_qty / i.pack_qty) : 0), 0);
-            const unitCost = Math.ceil(total / Math.max(1, rec.batch_size || 1));
+            const ingTotal = (Array.isArray(ings) ? ings : []).reduce((n, i) => n + (i.pack_qty > 0 ? Math.round(i.pack_cost_pence * i.used_qty / i.pack_qty) : 0), 0);
+            const labour = Math.round((rec.labour_minutes || 0) * (rec.labour_rate_pence_per_hour || 0) / 60);
+            const total = ingTotal + labour + (rec.overhead_pence || 0);
+            const unitCost = Math.ceil(total / Math.max(1, rec.batch_size || 1)) + (rec.packaging_pence_per_item || 0);
             await fetch(`${SUPABASE_URL}/rest/v1/shop_products?id=eq.${encodeURIComponent(rec.product_id)}`, {
               method: "PATCH",
               headers: { ...sb(env), "Content-Type": "application/json" },
@@ -3764,6 +3794,10 @@ ${(() => {
     <label>Recipe name<input name="name" required placeholder="e.g. White Sourdough" style="width:230px"></label>
     <label>Batch makes<input name="batch_size" type="number" min="1" value="1" style="width:90px"></label>
     <label>Linked product (optional)<select name="product_id" style="width:230px"><option value="">&mdash; none &mdash;</option>${products.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
+    <label>Hands-on time (mins)<input name="labour_minutes" type="number" min="0" value="0" style="width:100px"></label>
+    <label>Your rate &pound;/hour<input name="labour_rate" placeholder="0.00" style="width:90px"></label>
+    <label>Energy / overheads &pound; per batch<input name="overhead" placeholder="0.00" style="width:110px"></label>
+    <label>Packaging &pound; per item<input name="packaging" placeholder="0.00" style="width:100px"></label>
     <button type="submit" class="rc-btn">Create recipe</button>
   </form>
 </div>
@@ -3771,9 +3805,11 @@ ${(() => {
 ${recipes.length === 0 ? '<p class="rc-empty">No recipes yet &mdash; create your first one above.</p>' : recipes.map(r => {
   const ings = recipeIngs.filter(i => i.recipe_id === r.id);
   const lineCost = i => (i.pack_qty > 0 ? Math.round(i.pack_cost_pence * i.used_qty / i.pack_qty) : 0);
-  const totalP = ings.reduce((n, i) => n + lineCost(i), 0);
+  const ingP = ings.reduce((n, i) => n + lineCost(i), 0);
+  const labourP = Math.round((r.labour_minutes || 0) * (r.labour_rate_pence_per_hour || 0) / 60);
   const batch = Math.max(1, r.batch_size || 1);
-  const unitP = Math.ceil(totalP / batch);
+  const totalP = ingP + labourP + (r.overhead_pence || 0);
+  const unitP = Math.ceil(totalP / batch) + (r.packaging_pence_per_item || 0);
   const prod = products.find(p => p.id === r.product_id);
   return `
   <div class="rc-card">
@@ -3797,12 +3833,26 @@ ${recipes.length === 0 ? '<p class="rc-empty">No recipes yet &mdash; create your
       </tr>`).join("")}
     </table>
     <div class="rc-stats">
-      <div class="rc-stat"><div class="v">&pound;${(totalP/100).toFixed(2)}</div><div class="k">Batch cost</div></div>
+      <div class="rc-stat"><div class="v">&pound;${(ingP/100).toFixed(2)}</div><div class="k">Ingredients</div></div>
+      ${labourP ? `<div class="rc-stat"><div class="v">&pound;${(labourP/100).toFixed(2)}</div><div class="k">Your time (${r.labour_minutes}m @ &pound;${((r.labour_rate_pence_per_hour||0)/100).toFixed(2)}/h)</div></div>` : ""}
+      ${r.overhead_pence ? `<div class="rc-stat"><div class="v">&pound;${(r.overhead_pence/100).toFixed(2)}</div><div class="k">Energy &amp; overheads</div></div>` : ""}
+      <div class="rc-stat"><div class="v">&pound;${(totalP/100).toFixed(2)}</div><div class="k">Batch total</div></div>
       <div class="rc-stat"><div class="v">${batch}</div><div class="k">Makes</div></div>
+      ${r.packaging_pence_per_item ? `<div class="rc-stat"><div class="v">&pound;${(r.packaging_pence_per_item/100).toFixed(2)}</div><div class="k">Packaging / item</div></div>` : ""}
       <div class="rc-stat hero"><div class="v">&pound;${(unitP/100).toFixed(2)}</div><div class="k">Cost per item</div></div>
     </div>
     ${prod ? `<form method="POST" action="/admin/recipe-apply-cost" style="margin:0 0 4px"><input type="hidden" name="id" value="${esc(r.id)}"><button type="submit" class="rc-btn">Set &pound;${(unitP/100).toFixed(2)} as cost of ${esc(prod.name)}</button></form>` : ""}`}
     <div class="rc-add">
+      <p class="rc-title">Time &amp; overheads</p>
+      <form method="POST" action="/admin/recipe-update" class="rc-form" style="margin-bottom:16px">
+        <input type="hidden" name="id" value="${esc(r.id)}">
+        <label>Batch makes<input name="batch_size" type="number" min="1" value="${batch}" style="width:80px"></label>
+        <label>Hands-on time (mins)<input name="labour_minutes" type="number" min="0" value="${r.labour_minutes||0}" style="width:100px"></label>
+        <label>Your rate &pound;/hour<input name="labour_rate" value="${((r.labour_rate_pence_per_hour||0)/100).toFixed(2)}" style="width:90px"></label>
+        <label>Energy / overheads &pound; per batch<input name="overhead" value="${((r.overhead_pence||0)/100).toFixed(2)}" style="width:110px"></label>
+        <label>Packaging &pound; per item<input name="packaging" value="${((r.packaging_pence_per_item||0)/100).toFixed(2)}" style="width:100px"></label>
+        <button type="submit" class="rc-btn">Update</button>
+      </form>
       <p class="rc-title">Add ingredient</p>
       <form method="POST" action="/admin/recipe-ing-add" class="rc-form">
         <input type="hidden" name="recipe_id" value="${esc(r.id)}">
