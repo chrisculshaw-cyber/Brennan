@@ -4,7 +4,7 @@
 const SUPABASE_URL    = "https://rxofoezchnuwsvwcpklz.supabase.co";
 const SUMUP_API       = "https://api.sumup.com/v0.1/checkouts";
 const CURRENCY        = "GBP";
-const BREAD_CYCLE_CAP = 40; // max bread units (sourdough, inclusion loaves, focaccia) per bake day
+const BREAD_CYCLE_CAP = 40; // max tin-baked loaves (sourdough, inclusion loaves) per bake day — limited by bread tins
 const MODE = "live";
 const SUMUP_CONFIG = {
   sandbox: { secretName: "SumUp_Sandbox",   merchant: "YOUR_SANDBOX_MID" },
@@ -1036,7 +1036,7 @@ export default {
         // How many of each item are already committed this cycle (for the cap).
         const counts = await cycleCounts(env, SUPABASE_URL, sb, cycle_key);
 
-        // Global bread capacity for the cycle (sourdough / inclusion / focaccia).
+        // Global bread capacity for the cycle (tin-baked loaves only; flag lives in the DB).
         const breadRow = await fetch(
           `${SUPABASE_URL}/rest/v1/shop_cycle_bread_count?cycle_key=eq.${encodeURIComponent(cycle_key)}`,
           { headers: sb(env) }
@@ -3721,18 +3721,54 @@ ${(() => {
 </div>
 
 <div class="tab-panel" id="tab-costing">
+<style>
+  #tab-costing .rc-card { background:#fffdfb; border:1px solid #eadbc9; border-radius:14px;
+    padding:22px 24px; margin-bottom:24px; box-shadow:0 2px 12px rgba(122,79,60,0.05); }
+  #tab-costing .rc-card h2 { margin:0; font-family:'Fraunces',serif; font-weight:500; color:#7a4f3c; font-size:1.35rem; }
+  #tab-costing .rc-head { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+  #tab-costing label { display:flex; flex-direction:column; gap:5px; font-size:0.72rem;
+    text-transform:uppercase; letter-spacing:0.09em; color:#8a7360; font-weight:600; }
+  #tab-costing input, #tab-costing select { padding:10px 12px; border:1px solid #d8c5a8; border-radius:8px;
+    font-size:0.98rem; font-family:inherit; background:#fff; color:#3a2a1e; }
+  #tab-costing input:focus, #tab-costing select:focus { outline:none; border-color:#c7957b; box-shadow:0 0 0 3px rgba(199,149,123,0.15); }
+  #tab-costing .rc-form { display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end; }
+  #tab-costing .rc-btn { border:none; border-radius:8px; padding:11px 22px; font-weight:600; font-size:0.9rem;
+    cursor:pointer; background:#c7957b; color:#fff; transition:background .25s; }
+  #tab-costing .rc-btn:hover { background:#a97a61; }
+  #tab-costing .rc-btn.ghost { background:transparent; color:#9b2c2c; border:1px solid #e3b8b8; }
+  #tab-costing .rc-btn.ghost:hover { background:#fbeeee; }
+  #tab-costing table { width:100%; border-collapse:collapse; margin:16px 0 6px; }
+  #tab-costing th { text-align:left; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em;
+    color:#8a7360; padding:0 10px 8px 0; border-bottom:2px solid #eadbc9; }
+  #tab-costing td { padding:10px 10px 10px 0; border-bottom:1px solid #f2e8dd; font-size:0.96rem; color:#3a2a1e; }
+  #tab-costing td.num, #tab-costing th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  #tab-costing .rc-x { background:none; border:none; color:#c98d8d; font-size:1.15rem; cursor:pointer; padding:2px 6px; border-radius:6px; }
+  #tab-costing .rc-x:hover { color:#9b2c2c; background:#fbeeee; }
+  #tab-costing .rc-stats { display:flex; gap:12px; flex-wrap:wrap; margin:16px 0 14px; }
+  #tab-costing .rc-stat { background:#f7ede4; border-radius:10px; padding:12px 18px; }
+  #tab-costing .rc-stat .v { font-family:'Fraunces',serif; font-size:1.3rem; color:#7a4f3c; }
+  #tab-costing .rc-stat .k { font-size:0.68rem; text-transform:uppercase; letter-spacing:0.1em; color:#8a7360; margin-top:2px; }
+  #tab-costing .rc-stat.hero { background:#7a4f3c; } 
+  #tab-costing .rc-stat.hero .v { color:#fff; } #tab-costing .rc-stat.hero .k { color:#e8d3c5; }
+  #tab-costing .rc-link { font-size:0.88rem; color:#8a7360; font-style:italic; }
+  #tab-costing .rc-add { background:#faf5ef; border:1px dashed #d8c5a8; border-radius:10px; padding:16px 18px; margin-top:14px; }
+  #tab-costing .rc-add .rc-title { font-size:0.72rem; text-transform:uppercase; letter-spacing:0.1em; color:#8a7360; font-weight:700; margin:0 0 12px; }
+  #tab-costing .rc-empty { font-family:'Fraunces',serif; font-style:italic; color:#a98f7a; padding:8px 0 2px; }
+</style>
 <h1>Recipe costing</h1>
 <p class="sub">Enter the ingredients for a bake and the cost works itself out &mdash; per batch and per single item. Link a recipe to a shop product and you can push the cost per item straight into its Margins figure.</p>
 
-<h2>New recipe</h2>
-<form method="POST" action="/admin/recipe-create" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:26px">
-  <label>Recipe name<br><input name="name" required placeholder="e.g. White Sourdough" style="width:220px"></label>
-  <label>Batch makes<br><input name="batch_size" type="number" min="1" value="1" style="width:90px"> items</label>
-  <label>Linked product (optional)<br><select name="product_id" style="width:220px"><option value="">&mdash; none &mdash;</option>${products.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
-  <button type="submit">Create</button>
-</form>
+<div class="rc-card">
+  <div class="rc-head"><h2>New recipe</h2></div>
+  <form method="POST" action="/admin/recipe-create" class="rc-form" style="margin-top:14px">
+    <label>Recipe name<input name="name" required placeholder="e.g. White Sourdough" style="width:230px"></label>
+    <label>Batch makes<input name="batch_size" type="number" min="1" value="1" style="width:90px"></label>
+    <label>Linked product (optional)<select name="product_id" style="width:230px"><option value="">&mdash; none &mdash;</option>${products.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
+    <button type="submit" class="rc-btn">Create recipe</button>
+  </form>
+</div>
 
-${recipes.length === 0 ? '<p class="sub">No recipes yet.</p>' : recipes.map(r => {
+${recipes.length === 0 ? '<p class="rc-empty">No recipes yet &mdash; create your first one above.</p>' : recipes.map(r => {
   const ings = recipeIngs.filter(i => i.recipe_id === r.id);
   const lineCost = i => (i.pack_qty > 0 ? Math.round(i.pack_cost_pence * i.used_qty / i.pack_qty) : 0);
   const totalP = ings.reduce((n, i) => n + lineCost(i), 0);
@@ -3740,36 +3776,44 @@ ${recipes.length === 0 ? '<p class="sub">No recipes yet.</p>' : recipes.map(r =>
   const unitP = Math.ceil(totalP / batch);
   const prod = products.find(p => p.id === r.product_id);
   return `
-  <div style="border:1px solid #e5d5c5;border-radius:10px;padding:16px 18px;margin-bottom:22px;background:#fffdfb">
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
-      <h2 style="margin:0">${esc(r.name)}</h2>
+  <div class="rc-card">
+    <div class="rc-head">
+      <h2>${esc(r.name)}</h2>
       <form method="POST" action="/admin/recipe-delete" onsubmit="return confirm('Delete this recipe?')" style="margin:0">
-        <input type="hidden" name="id" value="${esc(r.id)}"><button type="submit" style="background:#9b2c2c">Delete recipe</button>
+        <input type="hidden" name="id" value="${esc(r.id)}"><button type="submit" class="rc-btn ghost">Delete</button>
       </form>
     </div>
-    ${ings.length === 0 ? '<p class="sub">No ingredients yet &mdash; add the first one below.</p>' : `
-    <table style="width:100%;border-collapse:collapse;margin:12px 0">
-      <tr style="text-align:left;border-bottom:1px solid #e5d5c5"><th>Ingredient</th><th>Pack</th><th>Pack cost</th><th>Amount used</th><th>Cost</th><th></th></tr>
-      ${ings.map(i => `<tr style="border-bottom:1px solid #f2e8dd">
+    ${prod ? `<p class="rc-link">Linked to ${esc(prod.name)} &middot; current cost on record &pound;${((prod.cost_pence||0)/100).toFixed(2)}</p>` : ""}
+    ${ings.length === 0 ? '<p class="rc-empty">No ingredients yet &mdash; add the first one below.</p>' : `
+    <table>
+      <tr><th>Ingredient</th><th class="num">Pack</th><th class="num">Pack cost</th><th class="num">Used</th><th class="num">Cost</th><th></th></tr>
+      ${ings.map(i => `<tr>
         <td>${esc(i.name)}</td>
-        <td>${i.pack_qty}${esc(i.unit)}</td>
-        <td>&pound;${(i.pack_cost_pence/100).toFixed(2)}</td>
-        <td>${i.used_qty}${esc(i.unit)}</td>
-        <td>&pound;${(lineCost(i)/100).toFixed(2)}</td>
-        <td><form method="POST" action="/admin/recipe-ing-delete" style="margin:0"><input type="hidden" name="id" value="${esc(i.id)}"><button type="submit" style="background:none;border:none;color:#9b2c2c;cursor:pointer">&times;</button></form></td>
+        <td class="num">${i.pack_qty}${esc(i.unit === 'each' ? '' : i.unit)}</td>
+        <td class="num">&pound;${(i.pack_cost_pence/100).toFixed(2)}</td>
+        <td class="num">${i.used_qty}${esc(i.unit === 'each' ? '' : i.unit)}</td>
+        <td class="num">&pound;${(lineCost(i)/100).toFixed(2)}</td>
+        <td style="text-align:right"><form method="POST" action="/admin/recipe-ing-delete" style="margin:0;display:inline"><input type="hidden" name="id" value="${esc(i.id)}"><button type="submit" class="rc-x" title="Remove ingredient">&times;</button></form></td>
       </tr>`).join("")}
     </table>
-    <p style="margin:8px 0"><strong>Batch cost: &pound;${(totalP/100).toFixed(2)}</strong> &nbsp;&middot;&nbsp; makes ${batch} &nbsp;&middot;&nbsp; <strong>cost per item: &pound;${(unitP/100).toFixed(2)}</strong>${prod ? ` &nbsp;&middot;&nbsp; linked to <em>${esc(prod.name)}</em> (current cost &pound;${((prod.cost_pence||0)/100).toFixed(2)})` : ""}</p>
-    ${prod ? `<form method="POST" action="/admin/recipe-apply-cost" style="margin:0 0 6px"><input type="hidden" name="id" value="${esc(r.id)}"><button type="submit">Set &pound;${(unitP/100).toFixed(2)} as cost of ${esc(prod.name)}</button></form>` : ""}`}
-    <form method="POST" action="/admin/recipe-ing-add" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:10px">
-      <input type="hidden" name="recipe_id" value="${esc(r.id)}">
-      <label>Ingredient<br><input name="name" required placeholder="e.g. Strong white flour" style="width:180px"></label>
-      <label>Pack cost &pound;<br><input name="pack_cost" required placeholder="1.60" style="width:80px"></label>
-      <label>Pack size<br><input name="pack_qty" required placeholder="1500" type="number" step="any" min="0.01" style="width:90px"></label>
-      <label>Unit<br><select name="unit"><option>g</option><option>kg</option><option>ml</option><option>l</option><option>each</option></select></label>
-      <label>Amount used<br><input name="used_qty" required placeholder="500" type="number" step="any" min="0" style="width:90px"></label>
-      <button type="submit">Add</button>
-    </form>
+    <div class="rc-stats">
+      <div class="rc-stat"><div class="v">&pound;${(totalP/100).toFixed(2)}</div><div class="k">Batch cost</div></div>
+      <div class="rc-stat"><div class="v">${batch}</div><div class="k">Makes</div></div>
+      <div class="rc-stat hero"><div class="v">&pound;${(unitP/100).toFixed(2)}</div><div class="k">Cost per item</div></div>
+    </div>
+    ${prod ? `<form method="POST" action="/admin/recipe-apply-cost" style="margin:0 0 4px"><input type="hidden" name="id" value="${esc(r.id)}"><button type="submit" class="rc-btn">Set &pound;${(unitP/100).toFixed(2)} as cost of ${esc(prod.name)}</button></form>` : ""}`}
+    <div class="rc-add">
+      <p class="rc-title">Add ingredient</p>
+      <form method="POST" action="/admin/recipe-ing-add" class="rc-form">
+        <input type="hidden" name="recipe_id" value="${esc(r.id)}">
+        <label>Ingredient<input name="name" required placeholder="e.g. Strong white flour" style="width:190px"></label>
+        <label>Pack cost &pound;<input name="pack_cost" required placeholder="1.60" style="width:85px"></label>
+        <label>Pack size<input name="pack_qty" required placeholder="1500" type="number" step="any" min="0.01" style="width:95px"></label>
+        <label>Unit<select name="unit"><option>g</option><option>kg</option><option>ml</option><option>l</option><option>each</option></select></label>
+        <label>Amount used<input name="used_qty" required placeholder="500" type="number" step="any" min="0" style="width:95px"></label>
+        <button type="submit" class="rc-btn">Add</button>
+      </form>
+    </div>
   </div>`;
 }).join("")}
 </div>
@@ -3888,7 +3932,7 @@ ${(() => {
   }
   (function(){
     const h = (location.hash || '').replace('#','');
-    if (h === 'products' || h === 'margins' || h === 'orders' || h === 'possales' || h === 'stock' || h === 'reviews' || h === 'cardpayments') { showTab(h); return; }
+    if (h === 'products' || h === 'margins' || h === 'orders' || h === 'possales' || h === 'stock' || h === 'reviews' || h === 'cardpayments' || h === 'costing') { showTab(h); return; }
     // A specific product anchor (#product-xxx): open Products and scroll to it.
     if (h.indexOf('product-') === 0) {
       showTab('products');
