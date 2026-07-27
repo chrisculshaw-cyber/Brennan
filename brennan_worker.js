@@ -4,6 +4,7 @@
 const SUPABASE_URL    = "https://rxofoezchnuwsvwcpklz.supabase.co";
 const SUMUP_API       = "https://api.sumup.com/v0.1/checkouts";
 const CURRENCY        = "GBP";
+const BREAD_CYCLE_CAP = 40; // max bread units (sourdough, inclusion loaves, focaccia) per bake day
 const MODE = "live";
 const SUMUP_CONFIG = {
   sandbox: { secretName: "SumUp_Sandbox",   merchant: "YOUR_SANDBOX_MID" },
@@ -1035,6 +1036,13 @@ export default {
         // How many of each item are already committed this cycle (for the cap).
         const counts = await cycleCounts(env, SUPABASE_URL, sb, cycle_key);
 
+        // Global bread capacity for the cycle (sourdough / inclusion / focaccia).
+        const breadRow = await fetch(
+          `${SUPABASE_URL}/rest/v1/shop_cycle_bread_count?cycle_key=eq.${encodeURIComponent(cycle_key)}`,
+          { headers: sb(env) }
+        ).then(r => r.json()).catch(() => []);
+        const breadUsed = (Array.isArray(breadRow) && breadRow[0] && breadRow[0].bread_units) || 0;
+
         // Build line items, check stock + per-cycle cap, compute total in pence.
         let total = 0;
         const lineItems = [];
@@ -1053,6 +1061,18 @@ export default {
           lineItems.push({ product_id: p.id, name: p.name, unit_price_pence: p.price_pence, quantity: qty });
         }
         if (total <= 0) return json({ error: "Invalid total" }, 400, cors);
+
+        // Enforce the overall bread limit per bake day.
+        const breadInCart = items.reduce((n, it) => {
+          const p = byId[it.id];
+          return n + ((p && p.is_bread) ? Math.max(1, parseInt(it.quantity, 10) || 1) : 0);
+        }, 0);
+        if (breadInCart > 0 && breadUsed + breadInCart > BREAD_CYCLE_CAP) {
+          const left = Math.max(0, BREAD_CYCLE_CAP - breadUsed);
+          return json({ error: left <= 0
+            ? "We're fully booked for bread on that bake day — please choose another day."
+            : `Only ${left} bread ${left === 1 ? "loaf" : "loaves"} left for that bake day — please reduce your bread items or choose another day.` }, 409, cors);
+        }
 
         const slotLabel = fulfilment_type === "delivery"
           ? `Delivery — ${cyc.label}`
@@ -1185,9 +1205,91 @@ export default {
           `${SUPABASE_URL}/rest/v1/shop_reviews?order=created_at.desc&limit=500`,
           { headers: sb(env) }
         ).then(r => r.json()).catch(() => []);
-        return new Response(adminPage(orders, itemsByOrder, bookings, products, posSales, reviews), {
+        const recipes = await fetch(
+          `${SUPABASE_URL}/rest/v1/shop_recipes?order=created_at.asc`,
+          { headers: sb(env) }
+        ).then(r => r.json()).catch(() => []);
+        const recipeIngs = await fetch(
+          `${SUPABASE_URL}/rest/v1/shop_recipe_ingredients?order=position.asc`,
+          { headers: sb(env) }
+        ).then(r => r.json()).catch(() => []);
+        return new Response(adminPage(orders, itemsByOrder, bookings, products, posSales, reviews, recipes, recipeIngs), {
           headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
         });
+      }
+
+
+      // ---- Recipe costing (CakeCost-style) ---------------------------------
+      if (url.pathname === "/admin/recipe-create" && request.method === "POST") {
+        if (!adminAuthed(request, env)) return adminChallenge();
+        const form = await request.formData();
+        const name = (form.get("name") || "").toString().trim().slice(0, 120);
+        if (name) {
+          const productId = (form.get("product_id") || "").toString().trim() || null;
+          const batch = Math.max(1, parseInt(form.get("batch_size"), 10) || 1);
+          await fetch(`${SUPABASE_URL}/rest/v1/shop_recipes`, {
+            method: "POST",
+            headers: { ...sb(env), "Content-Type": "application/json" },
+            body: JSON.stringify({ name, product_id: productId, batch_size: batch }),
+          });
+        }
+        return Response.redirect(`${SITE_BASE}/admin#costing`, 303);
+      }
+      if (url.pathname === "/admin/recipe-delete" && request.method === "POST") {
+        if (!adminAuthed(request, env)) return adminChallenge();
+        const form = await request.formData();
+        const id = (form.get("id") || "").toString();
+        if (id) await fetch(`${SUPABASE_URL}/rest/v1/shop_recipes?id=eq.${encodeURIComponent(id)}`, {
+          method: "DELETE", headers: sb(env),
+        });
+        return Response.redirect(`${SITE_BASE}/admin#costing`, 303);
+      }
+      if (url.pathname === "/admin/recipe-ing-add" && request.method === "POST") {
+        if (!adminAuthed(request, env)) return adminChallenge();
+        const form = await request.formData();
+        const recipeId = (form.get("recipe_id") || "").toString();
+        const name = (form.get("name") || "").toString().trim().slice(0, 120);
+        const packCost = Math.max(0, Math.round(parseFloat((form.get("pack_cost") || "0").toString().replace(/^£/, "")) * 100));
+        const packQty = Math.max(0.0001, parseFloat(form.get("pack_qty")) || 0);
+        const usedQty = Math.max(0, parseFloat(form.get("used_qty")) || 0);
+        const unit = (form.get("unit") || "g").toString().slice(0, 8);
+        if (recipeId && name) {
+          await fetch(`${SUPABASE_URL}/rest/v1/shop_recipe_ingredients`, {
+            method: "POST",
+            headers: { ...sb(env), "Content-Type": "application/json" },
+            body: JSON.stringify({ recipe_id: recipeId, name, pack_cost_pence: packCost, pack_qty: packQty, used_qty: usedQty, unit }),
+          });
+        }
+        return Response.redirect(`${SITE_BASE}/admin#costing`, 303);
+      }
+      if (url.pathname === "/admin/recipe-ing-delete" && request.method === "POST") {
+        if (!adminAuthed(request, env)) return adminChallenge();
+        const form = await request.formData();
+        const id = (form.get("id") || "").toString();
+        if (id) await fetch(`${SUPABASE_URL}/rest/v1/shop_recipe_ingredients?id=eq.${encodeURIComponent(id)}`, {
+          method: "DELETE", headers: sb(env),
+        });
+        return Response.redirect(`${SITE_BASE}/admin#costing`, 303);
+      }
+      if (url.pathname === "/admin/recipe-apply-cost" && request.method === "POST") {
+        if (!adminAuthed(request, env)) return adminChallenge();
+        const form = await request.formData();
+        const id = (form.get("id") || "").toString();
+        if (id) {
+          const recs = await fetch(`${SUPABASE_URL}/rest/v1/shop_recipes?id=eq.${encodeURIComponent(id)}`, { headers: sb(env) }).then(r => r.json()).catch(() => []);
+          const rec = Array.isArray(recs) && recs[0];
+          if (rec && rec.product_id) {
+            const ings = await fetch(`${SUPABASE_URL}/rest/v1/shop_recipe_ingredients?recipe_id=eq.${encodeURIComponent(id)}`, { headers: sb(env) }).then(r => r.json()).catch(() => []);
+            const total = (Array.isArray(ings) ? ings : []).reduce((n, i) => n + (i.pack_qty > 0 ? Math.round(i.pack_cost_pence * i.used_qty / i.pack_qty) : 0), 0);
+            const unitCost = Math.ceil(total / Math.max(1, rec.batch_size || 1));
+            await fetch(`${SUPABASE_URL}/rest/v1/shop_products?id=eq.${encodeURIComponent(rec.product_id)}`, {
+              method: "PATCH",
+              headers: { ...sb(env), "Content-Type": "application/json" },
+              body: JSON.stringify({ cost_pence: unitCost }),
+            });
+          }
+        }
+        return Response.redirect(`${SITE_BASE}/admin#costing`, 303);
       }
 
       // ---- 4c. Admin update (mark dispatched / cancelled / note) -----------
@@ -3189,7 +3291,7 @@ function bakingPage(cycles, cycleKey, totals, orders, items) {
 </body></html>`;
 }
 
-function adminPage(orders, itemsByOrder, bookings, products, posSales, reviews) {
+function adminPage(orders, itemsByOrder, bookings, products, posSales, reviews, recipes = [], recipeIngs = []) {
   bookings = bookings || [];
   products = products || [];
   posSales = posSales || [];
@@ -3344,6 +3446,7 @@ function adminPage(orders, itemsByOrder, bookings, products, posSales, reviews) 
   <button class="tab-btn" data-tab="possales" onclick="showTab('possales')">Market sales</button>
   <button class="tab-btn" data-tab="stock" onclick="showTab('stock')">Stock</button>
   <button class="tab-btn" data-tab="margins" onclick="showTab('margins')">Margins</button>
+  <button class="tab-btn" data-tab="costing" onclick="showTab('costing')">Costing</button>
   <button class="tab-btn" data-tab="reviews" onclick="showTab('reviews')">Reviews${(() => { const pend = (reviews||[]).filter(r => r.status === 'pending').length; return pend ? ` <span style="background:#9b2c2c;color:#fff;border-radius:10px;padding:1px 7px;font-size:0.72rem;margin-left:2px">${pend}</span>` : ''; })()}</button>
   <button class="tab-btn" data-tab="cardpayments" onclick="showTab('cardpayments')">Card payments</button>
 </div>
@@ -3615,6 +3718,60 @@ ${(() => {
   return `<table><thead><tr><th>Product</th><th class="r">Sells for</th><th class="r">Costs</th><th class="r">Profit</th><th class="r">Margin</th></tr></thead><tbody>${rows}</tbody></table>
     <p class="sub" style="margin-top:14px">Average margin across products with a cost set: <strong>${avgPct}%</strong>. Products showing “no cost set” are counted as full profit until you add their cost.</p>`;
 })()}
+</div>
+
+<div class="tab-panel" id="tab-costing">
+<h1>Recipe costing</h1>
+<p class="sub">Enter the ingredients for a bake and the cost works itself out &mdash; per batch and per single item. Link a recipe to a shop product and you can push the cost per item straight into its Margins figure.</p>
+
+<h2>New recipe</h2>
+<form method="POST" action="/admin/recipe-create" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:26px">
+  <label>Recipe name<br><input name="name" required placeholder="e.g. White Sourdough" style="width:220px"></label>
+  <label>Batch makes<br><input name="batch_size" type="number" min="1" value="1" style="width:90px"> items</label>
+  <label>Linked product (optional)<br><select name="product_id" style="width:220px"><option value="">&mdash; none &mdash;</option>${products.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
+  <button type="submit">Create</button>
+</form>
+
+${recipes.length === 0 ? '<p class="sub">No recipes yet.</p>' : recipes.map(r => {
+  const ings = recipeIngs.filter(i => i.recipe_id === r.id);
+  const lineCost = i => (i.pack_qty > 0 ? Math.round(i.pack_cost_pence * i.used_qty / i.pack_qty) : 0);
+  const totalP = ings.reduce((n, i) => n + lineCost(i), 0);
+  const batch = Math.max(1, r.batch_size || 1);
+  const unitP = Math.ceil(totalP / batch);
+  const prod = products.find(p => p.id === r.product_id);
+  return `
+  <div style="border:1px solid #e5d5c5;border-radius:10px;padding:16px 18px;margin-bottom:22px;background:#fffdfb">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+      <h2 style="margin:0">${esc(r.name)}</h2>
+      <form method="POST" action="/admin/recipe-delete" onsubmit="return confirm('Delete this recipe?')" style="margin:0">
+        <input type="hidden" name="id" value="${esc(r.id)}"><button type="submit" style="background:#9b2c2c">Delete recipe</button>
+      </form>
+    </div>
+    ${ings.length === 0 ? '<p class="sub">No ingredients yet &mdash; add the first one below.</p>' : `
+    <table style="width:100%;border-collapse:collapse;margin:12px 0">
+      <tr style="text-align:left;border-bottom:1px solid #e5d5c5"><th>Ingredient</th><th>Pack</th><th>Pack cost</th><th>Amount used</th><th>Cost</th><th></th></tr>
+      ${ings.map(i => `<tr style="border-bottom:1px solid #f2e8dd">
+        <td>${esc(i.name)}</td>
+        <td>${i.pack_qty}${esc(i.unit)}</td>
+        <td>&pound;${(i.pack_cost_pence/100).toFixed(2)}</td>
+        <td>${i.used_qty}${esc(i.unit)}</td>
+        <td>&pound;${(lineCost(i)/100).toFixed(2)}</td>
+        <td><form method="POST" action="/admin/recipe-ing-delete" style="margin:0"><input type="hidden" name="id" value="${esc(i.id)}"><button type="submit" style="background:none;border:none;color:#9b2c2c;cursor:pointer">&times;</button></form></td>
+      </tr>`).join("")}
+    </table>
+    <p style="margin:8px 0"><strong>Batch cost: &pound;${(totalP/100).toFixed(2)}</strong> &nbsp;&middot;&nbsp; makes ${batch} &nbsp;&middot;&nbsp; <strong>cost per item: &pound;${(unitP/100).toFixed(2)}</strong>${prod ? ` &nbsp;&middot;&nbsp; linked to <em>${esc(prod.name)}</em> (current cost &pound;${((prod.cost_pence||0)/100).toFixed(2)})` : ""}</p>
+    ${prod ? `<form method="POST" action="/admin/recipe-apply-cost" style="margin:0 0 6px"><input type="hidden" name="id" value="${esc(r.id)}"><button type="submit">Set &pound;${(unitP/100).toFixed(2)} as cost of ${esc(prod.name)}</button></form>` : ""}`}
+    <form method="POST" action="/admin/recipe-ing-add" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:10px">
+      <input type="hidden" name="recipe_id" value="${esc(r.id)}">
+      <label>Ingredient<br><input name="name" required placeholder="e.g. Strong white flour" style="width:180px"></label>
+      <label>Pack cost &pound;<br><input name="pack_cost" required placeholder="1.60" style="width:80px"></label>
+      <label>Pack size<br><input name="pack_qty" required placeholder="1500" type="number" step="any" min="0.01" style="width:90px"></label>
+      <label>Unit<br><select name="unit"><option>g</option><option>kg</option><option>ml</option><option>l</option><option>each</option></select></label>
+      <label>Amount used<br><input name="used_qty" required placeholder="500" type="number" step="any" min="0" style="width:90px"></label>
+      <button type="submit">Add</button>
+    </form>
+  </div>`;
+}).join("")}
 </div>
 
 <div class="tab-panel" id="tab-stock">
@@ -3924,7 +4081,17 @@ const STOREFRONT_HTML = `<!DOCTYPE html>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Brennan">
-<meta name="description" content="Brennan Bakehouse — a small-batch artisan bakery baking fresh sourdough, bread, pastries and cakes every morning. Order online for collection.">
+<meta name="description" content="Brennan Bakehouse — real ingredients, thoughtful baking. Fresh sourdough, focaccia, scones, sausage rolls and sweet bakes, baked Tuesdays &amp; Fridays. Order online for collection or free delivery in Brigstock &amp; Stanion.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Brennan Bakehouse">
+<meta property="og:title" content="Brennan Bakehouse — Fresh Artisan Bakery">
+<meta property="og:description" content="Real ingredients. Thoughtful baking. Fresh sourdough, focaccia, scones, sausage rolls and sweet bakes — order online for collection.">
+<meta property="og:url" content="https://brennanbakehouse.uk/">
+<meta property="og:image" content="https://brennanbakehouse.uk/images/social-card.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://brennanbakehouse.uk/images/social-card.jpg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400&family=Jost:wght@300;400;500&family=Tangerine:wght@700&display=swap" rel="stylesheet">
@@ -3967,8 +4134,8 @@ const STOREFRONT_HTML = `<!DOCTYPE html>
     border-bottom: 1px solid var(--line);
   }
   .nav-inner { display: flex; align-items: center; justify-content: space-between; padding: 14px 6vw; }
-  .nav-logo img { height: 72px; display: block; transition: height .3s ease; }
-  @media (max-width: 860px){ .nav-logo img { height: 56px; } }
+  .nav-logo img { height: 100px; display: block; transition: height .3s ease; filter: drop-shadow(0 2px 10px rgba(122,79,60,0.20)); }
+  @media (max-width: 860px){ .nav-logo img { height: 76px; } }
   nav ul { list-style: none; display: flex; gap: 34px; }
   nav a { font-size: 0.82rem; letter-spacing: 0.14em; text-transform: uppercase; font-weight: 400; position: relative; padding: 4px 0; }
   nav a::after { content:""; position:absolute; left:0; bottom:-2px; width:0; height:1px; background: var(--violet); transition: width .35s ease; }
@@ -4135,7 +4302,7 @@ const STOREFRONT_HTML = `<!DOCTYPE html>
   .intro h2 { font-size: clamp(2rem,4vw,3.1rem); font-weight:300; margin: 18px 0 0; }
   .intro h2 em { font-style:italic; color: var(--violet); }
   .intro .body p { margin-bottom: 22px; font-size:1.08rem; color:#7a5c4c; }
-  .pull { font-family:'Tangerine',cursive; font-size: clamp(3.2rem,6.5vw,4.6rem); color: var(--violet); line-height:1; margin: 10px 0 26px; }
+  .pull { font-family:'Tangerine',cursive; font-size: clamp(4rem,8vw,5.8rem); color: var(--violet); line-height:1; margin: 10px 0 26px; }
 
   /* ---------- Products ---------- */
   .shop { padding: clamp(60px,9vh,110px) 0 clamp(80px,12vh,140px); background: var(--paper-deep); position:relative; }
@@ -4156,8 +4323,6 @@ const STOREFRONT_HTML = `<!DOCTYPE html>
   .shop-chip.active .chip-n { opacity:0.55; }
   @media (max-width:760px){ .shop-filter { top:70px; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch;
     margin-left:-6vw; margin-right:-6vw; padding-left:6vw; padding-right:6vw; } .shop-chip{ flex:none; } }
-  @media (max-width:1100px){ .shop-row { grid-template-columns: repeat(3, 1fr); } }
-  @media (max-width:640px){ .shop-row { grid-template-columns: repeat(2, 1fr); gap:10px; } }
 
   /* Grouped "All" view */
   .products { display:block; }
@@ -4168,6 +4333,8 @@ const STOREFRONT_HTML = `<!DOCTYPE html>
   .shop-group-head .rule { flex:1; height:1px; background:linear-gradient(90deg,var(--gold),transparent); opacity:0.5; }
 
   .shop-row { display:grid; grid-template-columns: repeat(5, 1fr); gap:14px; }
+  @media (max-width:1100px){ .shop-row { grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width:640px){ .shop-row { grid-template-columns: repeat(2, 1fr); gap:10px; } }
   .shop-empty { text-align:center; padding:60px 20px; color:var(--gold); font-family:'Fraunces',serif; font-style:italic; font-size:1.05rem; }
 
   /* Elevated product card */
